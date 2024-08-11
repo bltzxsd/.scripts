@@ -259,7 +259,7 @@ def run(is_release):
 
 
 def main():
-    parser = argparse.ArgumentParser(prog="forge", description="c/cpp project builder")
+    parser = argparse.ArgumentParser(prog="mono", description="c/cpp helper")
     parser.add_argument("action", choices=["new", "build", "run"])
     parser.add_argument(
         "name",
