@@ -1,0 +1,290 @@
+#!/usr/bin/env python3
+
+import argparse
+import os
+import re
+import subprocess
+from collections import defaultdict
+from pathlib import Path
+
+CPP_MAIN = """\
+#include <iostream>
+
+int main() {
+    std::cout << "Hello, World!" << std::endl;
+}
+"""
+
+C_MAIN = """\
+#include <stdio.h>
+
+int main(void) {
+    printf("Hello, World!");
+}
+"""
+
+CLANG_TIDY = """\
+---
+Checks: "*,
+        -abseil-*,
+        -altera-*,
+        -android-*,
+        -fuchsia-*,
+        -google-*,
+        -llvm*,
+        -modernize-use-trailing-return-type,
+        -zircon-*,
+        -readability-else-after-return,
+        -readability-static-accessed-through-instance,
+        -readability-avoid-const-params-in-decls,
+        -cppcoreguidelines-non-private-member-variables-in-classes,
+        -misc-non-private-member-variables-in-classes,
+"
+WarningsAsErrors: ''
+HeaderFilterRegex: ''
+FormatStyle:     none
+"""
+
+
+# fmt: off
+c_headers = {
+    "assert.h", "complex.h", "ctype.h", "errno.h", "fenv.h", "float.h", "inttypes.h", "iso646.h", 
+    "limits.h", "locale.h", "math.h", "setjmp.h", "signal.h", "stdalign.h", "stdarg.h", 
+    "stdatomic.h", "stdbit.h", "stdbool.h", "stdckdint.h", "stddef.h", "stdint.h", "stdio.h", 
+    "stdlib.h", "stdnoreturn.h", "string.h", "tgmath.h", "threads.h", "time.h", "uchar.h", 
+    "wchar.h", "wctype.h", "aio.h", "arpa/inet.h", "cpio.h", "dirent.h", "dlfcn.h", 
+    "fcntl.h", "fmtmsg.h", "fnmatch.h", "ftw.h", "glob.h", "grp.h", "iconv.h", "langinfo.h", 
+    "libgen.h", "monetary.h", "mqueue.h", "ndbm.h", "net/if.h", "netdb.h", "netinet/in.h", 
+    "netinet/tcp.h", "nl_types.h", "poll.h", "pthread.h", "pwd.h", "regex.h", "sched.h", 
+    "search.h", "semaphore.h", "spawn.h", "strings.h", "stropts.h", "sys/ipc.h", 
+    "sys/mman.h", "sys/msg.h", "sys/resource.h", "sys/select.h", "sys/sem.h", "sys/shm.h", 
+    "sys/socket.h", "sys/stat.h", "sys/statvfs.h", "sys/time.h", "sys/times.h", "sys/types.h", 
+    "sys/uio.h", "sys/un.h", "sys/utsname.h", "sys/wait.h", "syslog.h", "tar.h", "termios.h", 
+    "trace.h", "ulimit.h", "unistd.h", "utime.h", "utmpx.h", "wordexp.h"
+}
+
+
+cpp_headers = {
+    "concepts", "coroutine", "any", "bitset", "chrono", "compare", "csetjmp", "csignal", 
+    "cstdarg", "cstddef", "cstdlib", "ctime", "debugging", "expected", "functional", 
+    "initializer_list", "optional", "source_location", "tuple", "type_traits", "typeindex", 
+    "typeinfo", "utility", "variant", "version", "memory", "memory_resource", "new", 
+    "scoped_allocator", "cfloat", "cinttypes", "climits", "cstdint", "limits", "stdfloat", 
+    "cassert", "cerrno", "exception", "stacktrace", "stdexcept", "system_error", "cctype", 
+    "charconv", "cstring", "cuchar", "cwchar", "cwctype", "format", "string", "string_view", 
+    "array", "deque", "flat_map", "flat_set", "forward_list", "inplace_vector", "list", 
+    "map", "mdspan", "queue", "set", "span", "stack", "unordered_map", "unordered_set", 
+    "vector", "iterator", "generator", "ranges", "algorithm", "execution", "bit", "cfenv", 
+    "cmath", "complex", "linalg", "numbers", "numeric", "random", "ratio", "valarray", 
+    "clocale", "codecvt", "locale", "text_encoding", "cstdio", "fstream", "iomanip", 
+    "ios", "iosfwd", "iostream", "istream", "ostream", "print", "spanstream", "sstream", 
+    "streambuf", "strstream", "syncstream", "filesystem", "regex", "atomic", "barrier", 
+    "condition_variable", "future", "hazard_pointer", "latch", "mutex", "rcu", "semaphore", 
+    "shared_mutex", "stop_token", "thread", "assert.h", "ctype.h", "errno.h", "fenv.h", 
+    "float.h", "inttypes.h", "limits.h", "locale.h", "math.h", "setjmp.h", "signal.h", 
+    "stdarg.h", "stddef.h", "stdint.h", "stdio.h", "stdlib.h", "string.h", "time.h", 
+    "uchar.h", "wchar.h", "wctype.h", "stdatomic.h", "ccomplex", "complex.h", "ctgmath", 
+    "tgmath.h", "ciso646", "cstdalign", "cstdbool", "iso646.h", "stdalign.h"
+}
+# fmt: on
+
+
+def parse_includes(file_path):
+    include_pattern = re.compile(r'^\s*#\s*include\s*[<"]([^>"]+)[>"]')
+    includes = []
+
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            for line in f:
+                match = include_pattern.match(line)
+                if match and (
+                    match.group(1) not in c_headers or match.group(1) not in cpp_headers
+                ):
+                    includes.append(match.group(1))
+    except IOError as e:
+        print(f"Error reading file {file_path}: {e}")
+
+    return includes
+
+
+def build_dependency_graph(src_dir, files):
+    graph = defaultdict(list)
+    for file in files:
+        full_path = os.path.normpath(os.path.join(src_dir, file))
+        try:
+            includes = parse_includes(full_path)
+            graph[file].extend(includes)
+        except FileNotFoundError:
+            print(f"Warning: File not found - {full_path}")
+        except Exception as e:
+            print(f"Error processing {full_path}: {e}")
+    return dict(graph)
+
+
+def topo_sort(graph):
+    visited, stack = set(), []
+
+    def dfs(node):
+        if node not in visited:
+            visited.add(node)
+            stack.extend(dfs(n) for n in graph.get(node, []))
+            stack.append(node)
+        return node
+
+    for node in graph:
+        dfs(node)
+
+    return stack[::-1]
+
+
+def generate_makefile(
+    sorted_files, src_dir, include_dir, compiler, flags, output, is_release=False
+):
+    build_dir = Path("./build")
+    if not is_release:
+        os.makedirs("./build/debug", exist_ok=True)
+        build_dir = build_dir / "debug"
+    else:
+        os.makedirs("./build/release", exist_ok=True)
+        build_dir = build_dir / "release"
+
+    object_files = [f"{build_dir}/{os.path.splitext(f.split('/')[-1])[0]}.o" for f in sorted_files]
+
+    with open("Makefile", "w", encoding="utf-8") as makefile:
+        makefile.write(f"{build_dir}/{output}: {' '.join(object_files)}\n")
+        makefile.write(f"\t{compiler} -o $@ $^\n\n")
+        loaded = []
+
+        for src, obj in zip(sorted_files, object_files):
+            if str(obj) in loaded:
+                continue
+            makefile.write(f"{obj}: {os.path.join(src_dir, src)}\n")
+            makefile.write(
+                f"\t{compiler} -c $< -I {include_dir} -o $@ {' '.join(flags)}\n\n"
+            )
+            loaded.append(str(obj))
+
+        makefile.write(f"clean:\n\trm -f *.o {build_dir}/{output}\n")
+
+
+def find_source_files(src_dir):
+    files = []
+    for root, _, filenames in os.walk(src_dir):
+        for filename in filenames:
+            if filename.endswith((".c", ".cpp")):
+                rel_path = os.path.relpath(os.path.join(root, filename), src_dir)
+                files.append(rel_path)
+    return files
+
+
+def new(name, is_cpp):
+    """
+    create a new project structure
+    """
+    dirs = ["src", "include", "lib"]
+    for folder in dirs:
+        print(f"creating directory: ./{name}/{folder}")
+        os.makedirs(f"./{name}/{folder}", exist_ok=True)
+
+    main = CPP_MAIN if is_cpp else C_MAIN
+    ty = "cpp" if is_cpp else "c"
+    with open(f"./{name}/src/main.{ty}", "w+", encoding="utf-8") as fmain:
+        fmain.write(main)
+
+    with open(f"./{name}/.gitignore", "w+", encoding="utf-8") as gitignore:
+        gitignore.write("build/\nbin/")
+
+    with open(f"./{name}/.clang-tidy", "w+", encoding="utf-8") as fclang_tidy:
+        fclang_tidy.write(CLANG_TIDY)
+
+    # set up git
+    subprocess.run(["git", "init", "-q", name])
+    print(f"initialized project: {name}")
+
+
+def build(project_dir=None, is_release=False):
+    if project_dir is None:
+        project_dir = Path(".")
+    project_name = os.path.basename(os.getcwd())
+
+    src_dir = project_dir / "src"
+    include_dir = project_dir / "include"
+    if not os.path.isdir(src_dir):
+        print(f"Error: src directory not found in {src_dir}")
+        return
+
+    files = find_source_files(src_dir)
+    if not files:
+        print(f"Error: No source files found in {src_dir}")
+        return
+
+    graph = build_dependency_graph(src_dir, files)
+    sorted_files = topo_sort(graph)
+
+    compiler = "g++" if any(f.endswith(".cpp") for f in files) else "gcc"
+    # fmt: off
+    c_flags = ["-Wall", "-Wextra", "-Wcast-align", "-std=c11", "-Wnull-dereference"]
+    cpp_flags = [ "-Wall", "-Wextra",
+        "-Wno-unused-parameter",
+        "-Wno-reorder",
+        "-Werror=return-type",
+    ]
+    # fmt: on
+    if is_release:
+        c_flags.append("-O2")
+        cpp_flags.append("-O2")
+    else:
+        c_flags.append("-g")
+        cpp_flags.append("-g")
+
+    flags = cpp_flags if compiler == "g++" else c_flags
+
+    generate_makefile(
+        sorted_files, src_dir, include_dir, compiler, flags, project_name, is_release
+    )
+    print(f"Generated Makefile for project: {project_name}")
+    subprocess.run(["make"])
+
+
+def run(is_release):
+    project_name = os.path.basename(os.getcwd())
+    build(is_release=is_release)
+    subprocess.run(["make"])
+    run_path = project_name
+    if is_release:
+        run_path = "/build/release"
+    else:
+        run_path = "/build/debug"
+    print()
+    subprocess.run([f"./{run_path}/{project_name}"])
+
+
+def main():
+    parser = argparse.ArgumentParser(prog="forge", description="c/cpp project builder")
+    parser.add_argument("action", choices=["new", "build", "run"])
+    parser.add_argument(
+        "name",
+        nargs="?",
+        default=None,
+        help="Project name (required for 'new', optional for 'build')",
+    )
+    parser.add_argument("--cpp", action="store_true", help="Use C++ (default is C)")
+    parser.add_argument(
+        "--release", "-r", action="store_true", help="Specify release and build version"
+    )
+
+    args = parser.parse_args()
+
+    if args.action == "new":
+        if args.name is None:
+            print("Error: Project name is required for 'new' action")
+            return
+        new(args.name, args.cpp)
+    elif args.action == "build":
+        build(args.name, is_release=args.release)
+    elif args.action == "run":
+        run(args.release)
+
+
+if __name__ == "__main__":
+    main()
