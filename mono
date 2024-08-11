@@ -155,20 +155,15 @@ def generate_makefile(
     ]
 
     with open("Makefile", "w", encoding="utf-8") as makefile:
+        makefile.write(f"CC_FLAGS = {' '.join(flags)}\n\n")
         makefile.write(f"{build_dir}/{output}: {' '.join(object_files)}\n")
         makefile.write(f"\t{compiler} -o $@ $^\n\n")
-        loaded = []
 
-        for src, obj in zip(sorted_files, object_files):
-            if str(obj) in loaded:
-                continue
+        for src, obj in zip(cpp_files, object_files):
             makefile.write(f"{obj}: {os.path.join(src_dir, src)}\n")
-            makefile.write(
-                f"\t{compiler} -c $< -I {include_dir} -o $@ {' '.join(flags)}\n\n"
-            )
-            loaded.append(str(obj))
+            makefile.write(f"\t{compiler} -c $< -I {include_dir} -o $@ $(CC_FLAGS)\n\n")
 
-        makefile.write(f"clean:\n\trm -f *.o {build_dir}/{output}\n")
+        makefile.write(f"clean:\n\trm -f *.o {build_dir}/*\n")
 
 
 def find_source_files(src_dir):
