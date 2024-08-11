@@ -98,7 +98,8 @@ def parse_includes(file_path):
             for line in f:
                 match = include_pattern.match(line)
                 if match and (
-                    match.group(1) not in c_headers or match.group(1) not in cpp_headers
+                    match.group(1) not in c_headers
+                    and match.group(1) not in cpp_headers
                 ):
                     includes.append(match.group(1))
     except IOError as e:
