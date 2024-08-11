@@ -149,7 +149,10 @@ def generate_makefile(
         os.makedirs("./build/release", exist_ok=True)
         build_dir = build_dir / "release"
 
-    object_files = [f"{build_dir}/{os.path.splitext(f.split('/')[-1])[0]}.o" for f in sorted_files]
+    cpp_files = [f for f in sorted_files if f.endswith((".c", ".cpp"))]
+    object_files = [
+        f"{build_dir}/{os.path.splitext(f.split('/')[-1])[0]}.o" for f in cpp_files
+    ]
 
     with open("Makefile", "w", encoding="utf-8") as makefile:
         makefile.write(f"{build_dir}/{output}: {' '.join(object_files)}\n")
